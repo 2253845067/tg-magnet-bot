@@ -110,36 +110,41 @@ class MagnetBot:
         await self._search_and_reply(update, context, text)
 
     async def download_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._allowed(update):
-            return
-
         query = update.callback_query
         if not query:
             return
         await query.answer()
 
+        if not await self._allowed(update):
+            return
+
+        message = query.message
+        if message is None:
+            return
+
         if query.data == "cancel":
-            context.user_data.pop("last_results", None)
-            context.user_data.pop("last_query", None)
-            await query.message.edit_text("已取消。")
+            searches = context.user_data.get("searches")
+            if searches:
+                searches.pop((message.chat_id, message.message_id), None)
+            await message.edit_text("已取消。")
             return
 
         try:
             index = int(query.data.split(":", 1)[1])
         except (IndexError, ValueError):
-            await query.message.reply_text("这个选择已失效，请重新搜索。")
+            await message.reply_text("这个选择已失效，请重新搜索。")
             return
 
-        results: list[SearchResult] = context.user_data.get("last_results", [])
-        if index < 0 or index >= len(results):
-            await query.message.reply_text("这个选择已失效，请重新搜索。")
+        searches = context.user_data.get("searches", {})
+        results = searches.get((message.chat_id, message.message_id))
+        if results is None or index < 0 or index >= len(results):
+            await message.reply_text("这个选择已失效，请重新搜索。")
             return
 
-        context.user_data.pop("last_results", None)
-        context.user_data.pop("last_query", None)
+        searches.pop((message.chat_id, message.message_id), None)
 
         result = results[index]
-        status = await query.message.edit_text(f"正在获取磁力链接：{result.title}")
+        status = await message.edit_text(f"正在获取磁力链接：{result.title}")
         try:
             detail = await self._cili.detail(result.detail_url)
             await asyncio.to_thread(
@@ -175,8 +180,10 @@ class MagnetBot:
             await notice.edit_text("没有找到结果。")
             return
 
-        context.user_data["last_results"] = results
-        context.user_data["last_query"] = query
+        searches = context.user_data.setdefault("searches", {})
+        searches[(notice.chat_id, notice.message_id)] = results
+        if len(searches) > 30:
+            searches.pop(next(iter(searches)))
         await notice.edit_text(
             _format_results(query, results),
             reply_markup=_result_keyboard(results),

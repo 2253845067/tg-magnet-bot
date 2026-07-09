@@ -52,8 +52,8 @@ def _looks_like_already_exists(message: str) -> bool:
     return "exist" in lowered or "already" in lowered or "已存在" in message
 
 
-def _is_duplicate_offline_task_error(exc: grpc.RpcError) -> bool:
-    details = exc.details() or ""
+def _is_duplicate_offline_task_error(exc: BaseException) -> bool:
+    details = (exc.details() or "") if isinstance(exc, grpc.RpcError) else str(exc)
     return "code: 10008" in details or "任务已存在" in details
 
 
@@ -105,21 +105,26 @@ class CloudDriveClient:
     def add_offline_file(self, magnet_url: str, dest_folder: str):
         metadata = self._auth_metadata()
         try:
-            return self._add_offline_file(magnet_url, dest_folder, metadata)
+            return self._add_offline_file_or_duplicate(magnet_url, dest_folder, metadata)
         except grpc.RpcError as exc:
-            if _is_duplicate_offline_task_error(exc):
-                logger.info("Offline task already exists; treating it as success")
-                return pb2.FileOperationResult(success=True)
             if self._auto_create_dest_folder and exc.code() == grpc.StatusCode.NOT_FOUND:
                 logger.info("Destination folder %s was not found; creating it", dest_folder)
                 self._ensure_folder_path(dest_folder, metadata)
-                try:
-                    return self._add_offline_file(magnet_url, dest_folder, metadata)
-                except grpc.RpcError as retry_exc:
-                    if _is_duplicate_offline_task_error(retry_exc):
-                        logger.info("Offline task already exists after folder creation; treating it as success")
-                        return pb2.FileOperationResult(success=True)
-                    raise
+                return self._add_offline_file_or_duplicate(magnet_url, dest_folder, metadata)
+            raise
+
+    def _add_offline_file_or_duplicate(
+        self,
+        magnet_url: str,
+        dest_folder: str,
+        metadata: tuple[tuple[str, str], ...],
+    ):
+        try:
+            return self._add_offline_file(magnet_url, dest_folder, metadata)
+        except (grpc.RpcError, CloudDriveError) as exc:
+            if _is_duplicate_offline_task_error(exc):
+                logger.info("Offline task already exists; treating it as success")
+                return pb2.FileOperationResult(success=True)
             raise
 
     def _add_offline_file(
