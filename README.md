@@ -50,6 +50,24 @@ CLOUDDRIVE_AUTO_CREATE_DEST_FOLDER=true
 CILI_BASE_URLS=https://xcili.net,https://1cili.net,https://cili.info,https://cili.uk,https://wuji.me
 ```
 
+### Telegram 代理
+
+如果你的网络需要代理才能访问 Telegram，推荐只给 Telegram Bot API 配置代理，不要给整个容器设置 `HTTP_PROXY`，避免 CloudDrive2 gRPC 也被代理影响。
+
+host 网络模式下，如果 Clash 运行在宿主机，通常填：
+
+```env
+TELEGRAM_PROXY_URL=http://127.0.0.1:7890
+```
+
+默认 bridge 网络下，可以尝试：
+
+```env
+TELEGRAM_PROXY_URL=http://host.docker.internal:7890
+```
+
+这里建议使用 Clash 的 HTTP/mixed 端口。端口号按你的 Clash 实际配置修改，常见是 `7890`。
+
 ### CloudDrive2 地址
 
 `CLOUDDRIVE_GRPC_ADDR` 应该填写 CloudDrive2 原生 gRPC 地址，优先使用直连 `host:port`：

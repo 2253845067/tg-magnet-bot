@@ -37,12 +37,16 @@ class MagnetBot:
         self._clouddrive = clouddrive
 
     def build_application(self) -> Application:
-        app = (
+        builder = (
             Application.builder()
             .token(self._settings.telegram_bot_token)
             .post_shutdown(self.shutdown)
-            .build()
         )
+        if self._settings.telegram_proxy_url:
+            builder = builder.proxy(self._settings.telegram_proxy_url)
+            builder = builder.get_updates_proxy(self._settings.telegram_proxy_url)
+
+        app = builder.build()
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("help", self.help))
         app.add_handler(CommandHandler("status", self.status))

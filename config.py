@@ -53,6 +53,7 @@ CILI_DEFAULT_BASE_URLS = (
 class Settings:
     telegram_bot_token: str
     telegram_allowed_user_ids: set[int]
+    telegram_proxy_url: str
     clouddrive_grpc_addr: str
     clouddrive_grpc_tls: bool
     clouddrive_api_token: str
@@ -74,6 +75,7 @@ def load_settings() -> Settings:
     settings = Settings(
         telegram_bot_token=_str("TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_ids("TELEGRAM_ALLOWED_USER_IDS"),
+        telegram_proxy_url=_str("TELEGRAM_PROXY_URL"),
         clouddrive_grpc_addr=_str("CLOUDDRIVE_GRPC_ADDR", "host.docker.internal:19798"),
         clouddrive_grpc_tls=_bool("CLOUDDRIVE_GRPC_TLS"),
         clouddrive_api_token=_str("CLOUDDRIVE_API_TOKEN"),
