@@ -1,0 +1,7 @@
+beautifulsoup4==4.12.3
+grpcio==1.66.2
+grpcio-tools==1.66.2
+httpx==0.27.2
+protobuf==5.27.2
+python-dotenv==1.0.1
+python-telegram-bot==21.6
