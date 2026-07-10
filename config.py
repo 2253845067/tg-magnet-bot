@@ -66,6 +66,8 @@ class Settings:
     cili_base_urls: list[str]
     max_search_results: int
     http_timeout_secs: int
+    cili_max_retries: int
+    cili_retry_backoff_secs: int
     log_level: str
     polling_timeout_secs: int
     polling_connect_timeout_secs: int
@@ -93,6 +95,8 @@ def load_settings() -> Settings:
         cili_base_urls=_load_cili_base_urls(),
         max_search_results=max(1, min(_int("MAX_SEARCH_RESULTS", 8), 20)),
         http_timeout_secs=_int("HTTP_TIMEOUT_SECS", 15),
+        cili_max_retries=max(0, _int("CILI_MAX_RETRIES", 2)),
+        cili_retry_backoff_secs=max(0, _int("CILI_RETRY_BACKOFF_SECS", 1)),
         log_level=_str("LOG_LEVEL", "INFO").upper(),
         polling_timeout_secs=_int("POLLING_TIMEOUT_SECS", 20),
         polling_connect_timeout_secs=_int("POLLING_CONNECT_TIMEOUT_SECS", 10),

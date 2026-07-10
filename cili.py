@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -15,15 +16,32 @@ from models import MagnetDetail, SearchResult
 logger = logging.getLogger(__name__)
 
 
+# Transient status codes worth retrying (rate-limit / server errors).
+# 403 and 404 are not retried: a block or missing page won't change on retry.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 520, 521, 522, 523, 524})
+
+
 class CiliError(RuntimeError):
     pass
 
 
 class CiliClient:
-    def __init__(self, base_urls: str | list[str], timeout_secs: int = 15) -> None:
+    def __init__(
+        self,
+        base_urls: str | list[str],
+        timeout_secs: int = 15,
+        max_retries: int = 2,
+        retry_backoff_secs: float = 1.0,
+    ) -> None:
         if isinstance(base_urls, str):
             base_urls = [base_urls]
         self._base_urls = [url.rstrip("/") for url in base_urls if url.strip()]
+        self._timeout = timeout_secs
+        self._max_retries = max(0, int(max_retries))
+        self._retry_backoff = float(retry_backoff_secs)
+        # Last site that successfully answered a search; tried first next time
+        # so a flaky-but-working site isn't re-probed from scratch every query.
+        self._preferred: str | None = None
         self._client = httpx.AsyncClient(
             timeout=timeout_secs,
             follow_redirects=True,
@@ -77,9 +95,9 @@ class CiliClient:
 
     async def _search_response(self, query: str) -> httpx.Response:
         failures: list[str] = []
-        for base_url in self._base_urls:
+        for base_url in self._ordered_base_urls():
             try:
-                response = await self._client.get(
+                response = await self._get_with_retry(
                     f"{base_url}/search",
                     params={"q": query},
                     headers={"Referer": f"{base_url}/"},
@@ -88,20 +106,30 @@ class CiliClient:
                 failures.append(f"{base_url}: {_http_error_message(exc)}")
                 continue
 
-            if response.status_code in {403, 429, 500, 502, 503, 520, 521, 522, 523, 524}:
+            if response.status_code >= 400:
                 failures.append(f"{base_url}: HTTP {response.status_code}")
-                logger.warning("cili search failed on %s with HTTP %s", base_url, response.status_code)
                 continue
 
-            response.raise_for_status()
+            self._set_preferred(base_url)
             return response
 
         detail = "；".join(failures) if failures else "未配置搜索站点"
         raise CiliError(f"所有磁力搜索站点都失败了（{detail}）")
 
     async def detail(self, detail_url: str) -> MagnetDetail:
-        response = await self._detail_response(detail_url)
-        response.raise_for_status()
+        # The stored detail_url already points at the originating site, so we
+        # only fetch from there. Fanning the same path out across every
+        # configured base URL used to produce 404s because each site's
+        # /!xxxx paths are not portable between domains.
+        try:
+            response = await self._get_with_retry(
+                detail_url,
+                headers={"Referer": _referer_for(detail_url)},
+            )
+        except httpx.HTTPError as exc:
+            raise CiliError(f"磁力详情页请求失败：{_http_error_message(exc)}") from exc
+        if response.status_code >= 400:
+            raise CiliError(f"磁力详情页返回 HTTP {response.status_code}")
         soup = BeautifulSoup(response.text, "html.parser")
 
         magnet = _extract_magnet(soup, response.text)
@@ -120,41 +148,75 @@ class CiliClient:
             info_hash=info_hash,
         )
 
-    async def _detail_response(self, detail_url: str) -> httpx.Response:
-        failures: list[str] = []
-        for url in self._detail_candidates(detail_url):
+    async def _get_with_retry(
+        self,
+        url: str,
+        *,
+        params=None,
+        headers=None,
+    ) -> httpx.Response:
+        """GET with retry/backoff for transient failures.
+
+        Retries network errors (timeouts, connection failures) and retryable
+        HTTP statuses (429, 5xx) with exponential backoff. Honors a
+        ``Retry-After`` header on 429. Non-retryable responses (2xx, 403, 404)
+        are returned as-is for the caller to judge. Retry attempts use a
+        shorter timeout than the first try to bound total elapsed time.
+        """
+        last_error: BaseException | None = None
+        for attempt in range(self._max_retries + 1):
             try:
                 response = await self._client.get(
                     url,
-                    headers={"Referer": _referer_for(url)},
+                    params=params,
+                    headers=headers,
+                    timeout=self._timeout if attempt == 0 else min(self._timeout, 8),
                 )
             except httpx.HTTPError as exc:
-                failures.append(f"{url}: {_http_error_message(exc)}")
-                logger.warning("cili detail request failed on %s: %s", url, exc.__class__.__name__)
+                last_error = exc
+                if attempt < self._max_retries:
+                    wait = self._retry_backoff * (2 ** attempt)
+                    logger.warning(
+                        "cili request failed on %s (attempt %d/%d, retrying in %.1fs): %s",
+                        url,
+                        attempt + 1,
+                        self._max_retries + 1,
+                        wait,
+                        _http_error_message(exc),
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.warning(
+                    "cili request failed on %s after %d attempts: %s",
+                    url,
+                    self._max_retries + 1,
+                    _http_error_message(exc),
+                )
+                raise
+            # We got a response; decide whether to retry it.
+            if response.status_code in _RETRYABLE_STATUS and attempt < self._max_retries:
+                wait = _retry_after_secs(response) or self._retry_backoff * (2 ** attempt)
+                logger.warning(
+                    "cili got HTTP %s on %s (attempt %d/%d, retrying in %.1fs)",
+                    response.status_code,
+                    url,
+                    attempt + 1,
+                    self._max_retries + 1,
+                    wait,
+                )
+                await asyncio.sleep(wait)
                 continue
-
-            if response.status_code in {403, 429, 500, 502, 503, 520, 521, 522, 523, 524}:
-                failures.append(f"{url}: HTTP {response.status_code}")
-                logger.warning("cili detail failed on %s with HTTP %s", url, response.status_code)
-                continue
-
-            response.raise_for_status()
             return response
+        # Defensive: the loop only ends via `return` or `raise` above.
+        raise last_error or RuntimeError("cili: request exhausted without response")
 
-        detail = "；".join(failures) if failures else "没有可用详情页地址"
-        raise CiliError(f"磁力详情页获取失败（{detail}）")
+    def _ordered_base_urls(self) -> list[str]:
+        if self._preferred and self._preferred in self._base_urls:
+            return [self._preferred, *[u for u in self._base_urls if u != self._preferred]]
+        return self._base_urls
 
-    def _detail_candidates(self, detail_url: str) -> list[str]:
-        parsed = urlparse(detail_url)
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-
-        candidates: list[str] = []
-        for url in [detail_url, *(urljoin(base_url + "/", path.lstrip("/")) for base_url in self._base_urls)]:
-            if url not in candidates:
-                candidates.append(url)
-        return candidates
+    def _set_preferred(self, base_url: str) -> None:
+        self._preferred = base_url
 
 
 def _result_title(link) -> str:
@@ -231,3 +293,13 @@ def _http_error_message(exc: httpx.HTTPError) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "请求超时"
     return str(exc) or exc.__class__.__name__
+
+
+def _retry_after_secs(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None

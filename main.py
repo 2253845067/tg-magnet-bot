@@ -17,7 +17,12 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    cili = CiliClient(settings.cili_base_urls, settings.http_timeout_secs)
+    cili = CiliClient(
+        settings.cili_base_urls,
+        settings.http_timeout_secs,
+        max_retries=settings.cili_max_retries,
+        retry_backoff_secs=settings.cili_retry_backoff_secs,
+    )
     clouddrive = CloudDriveClient(
         settings.clouddrive_grpc_addr,
         use_tls=settings.clouddrive_grpc_tls,
