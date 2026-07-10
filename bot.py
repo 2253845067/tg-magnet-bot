@@ -7,7 +7,13 @@ import time
 
 import grpc
 import httpx
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonCommands,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -174,7 +180,19 @@ class MagnetBot:
         )
 
     async def _start_polling_guard(self, app: Application) -> None:
+        await self._register_commands(app)
         asyncio.create_task(self._polling_guard.watchdog())
+
+    async def _register_commands(self, app: Application) -> None:
+        # 注册命令菜单：输入框旁的 "/" 菜单按钮会列出这些命令。
+        await app.bot.set_my_commands([
+            BotCommand("start", "开始使用 / 查看帮助"),
+            BotCommand("search", "搜索磁力资源"),
+            BotCommand("status", "检查 CloudDrive2 连接状态"),
+            BotCommand("help", "查看帮助"),
+        ])
+        # 让输入框旁的菜单按钮直接打开命令列表（默认即是，这里显式设定更稳妥）。
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     async def shutdown(self, _: Application) -> None:
         await self._cili.close()
