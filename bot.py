@@ -105,14 +105,17 @@ class _GuardedExtBot(ExtBot):
 
     Subclassing is required because ``ExtBot`` is a ``TelegramObject`` and
     forbids assigning to its methods at runtime (``bot.get_updates = ...``
-    raises ``AttributeError``). The guard is attached in ``post_init``.
+    raises ``AttributeError``). The guard is attached during construction to
+    avoid mutating the frozen TelegramObject instance at startup.
     """
 
-    _polling_guard: "_PollingGuard | None" = None
+    __slots__ = ("_polling_guard",)
+
+    def __init__(self, *args, polling_guard: _PollingGuard, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "_polling_guard", polling_guard)
 
     async def get_updates(self, *args, **kwargs):
-        if self._polling_guard is None:
-            return await super().get_updates(*args, **kwargs)
         return await self._polling_guard(super().get_updates, *args, **kwargs)
 
 
@@ -128,7 +131,15 @@ class MagnetBot:
         self._clouddrive = clouddrive
 
     def build_application(self) -> Application:
-        bot = self._build_guarded_bot()
+        settings = self._settings
+        self._polling_guard = _PollingGuard(
+            max_consecutive_failures=settings.polling_max_failures,
+            staleness_timeout=float(settings.polling_staleness_secs),
+            heartbeat_interval=min(
+                30.0, float(settings.polling_staleness_secs) / 2
+            ),
+        )
+        bot = self._build_guarded_bot(self._polling_guard)
         builder = (
             Application.builder()
             .bot(bot)
@@ -146,7 +157,7 @@ class MagnetBot:
         app.add_error_handler(self.error_handler)
         return app
 
-    def _build_guarded_bot(self) -> "_GuardedExtBot":
+    def _build_guarded_bot(self, polling_guard: _PollingGuard) -> "_GuardedExtBot":
         settings = self._settings
         proxy = settings.telegram_proxy_url
         get_updates_request = HTTPXRequest(
@@ -159,20 +170,11 @@ class MagnetBot:
             token=settings.telegram_bot_token,
             request=request,
             get_updates_request=get_updates_request,
+            polling_guard=polling_guard,
         )
 
     async def _start_polling_guard(self, app: Application) -> None:
-        settings = self._settings
-        guard = _PollingGuard(
-            max_consecutive_failures=settings.polling_max_failures,
-            staleness_timeout=float(settings.polling_staleness_secs),
-            heartbeat_interval=min(
-                30.0, float(settings.polling_staleness_secs) / 2
-            ),
-        )
-        app.bot._polling_guard = guard
-        self._polling_guard = guard
-        asyncio.create_task(guard.watchdog())
+        asyncio.create_task(self._polling_guard.watchdog())
 
     async def shutdown(self, _: Application) -> None:
         await self._cili.close()
