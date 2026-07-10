@@ -198,9 +198,24 @@ class MagnetBot:
         get_updates_request = HTTPXRequest(
             connect_timeout=settings.polling_connect_timeout_secs,
             read_timeout=settings.polling_read_timeout_secs,
+            # Long-poll needs its own connection; give the pool a bit of slack
+            # so a getUpdates in flight never blocks acquisition.
+            connection_pool_size=2,
+            pool_timeout=float(settings.telegram_pool_timeout_secs),
             proxy_url=proxy or None,
         )
-        request = HTTPXRequest(proxy_url=proxy or None)
+        # Outbound request (send/edit). Building HTTPXRequest by hand bypasses
+        # ApplicationBuilder's larger defaults, which would otherwise leave the
+        # pool at size 1 / pool_timeout 1s and cause PoolTimeout under a slow
+        # proxy. Size the pool and timeouts explicitly.
+        request = HTTPXRequest(
+            connection_pool_size=settings.telegram_pool_size,
+            pool_timeout=float(settings.telegram_pool_timeout_secs),
+            connect_timeout=settings.polling_connect_timeout_secs,
+            read_timeout=30,
+            write_timeout=30,
+            proxy_url=proxy or None,
+        )
         return _GuardedExtBot(
             token=settings.telegram_bot_token,
             request=request,

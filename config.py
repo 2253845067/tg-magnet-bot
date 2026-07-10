@@ -54,6 +54,8 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_user_ids: set[int]
     telegram_proxy_url: str
+    telegram_pool_size: int
+    telegram_pool_timeout_secs: int
     cili_proxy_url: str
     clouddrive_grpc_addr: str
     clouddrive_grpc_tls: bool
@@ -84,6 +86,12 @@ def load_settings() -> Settings:
         telegram_bot_token=_str("TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_ids("TELEGRAM_ALLOWED_USER_IDS"),
         telegram_proxy_url=_str("TELEGRAM_PROXY_URL"),
+        # Outbound API pool. A custom-built bot bypasses ApplicationBuilder's
+        # larger defaults, so HTTPXRequest falls back to pool size 1 / pool
+        # timeout 1s — under a slow proxy a single reply occupies the only
+        # connection and everything else raises PoolTimeout. Give it room.
+        telegram_pool_size=max(1, _int("TELEGRAM_POOL_SIZE", 8)),
+        telegram_pool_timeout_secs=max(1, _int("TELEGRAM_POOL_TIMEOUT_SECS", 20)),
         # cili scrapes overseas sites; by default route it through the same
         # proxy the bot uses for Telegram so it isn't crawling over a direct
         # (often blocked / slow) connection. Override with CILI_PROXY_URL.
