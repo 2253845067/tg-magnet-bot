@@ -67,6 +67,11 @@ class Settings:
     max_search_results: int
     http_timeout_secs: int
     log_level: str
+    polling_timeout_secs: int
+    polling_connect_timeout_secs: int
+    polling_read_timeout_secs: int
+    polling_max_failures: int
+    polling_staleness_secs: int
 
 
 def load_settings() -> Settings:
@@ -89,6 +94,13 @@ def load_settings() -> Settings:
         max_search_results=max(1, min(_int("MAX_SEARCH_RESULTS", 8), 20)),
         http_timeout_secs=_int("HTTP_TIMEOUT_SECS", 15),
         log_level=_str("LOG_LEVEL", "INFO").upper(),
+        polling_timeout_secs=_int("POLLING_TIMEOUT_SECS", 20),
+        polling_connect_timeout_secs=_int("POLLING_CONNECT_TIMEOUT_SECS", 10),
+        # read_timeout must stay comfortably above the long-poll timeout,
+        # otherwise getUpdates raises ReadTimeout before Telegram responds.
+        polling_read_timeout_secs=_int("POLLING_READ_TIMEOUT_SECS", 60),
+        polling_max_failures=_int("POLLING_MAX_FAILURES", 5),
+        polling_staleness_secs=_int("POLLING_STALENESS_SECS", 300),
     )
 
     if not settings.telegram_bot_token:

@@ -31,7 +31,12 @@ def main() -> None:
 
     bot = MagnetBot(settings, cili, clouddrive)
     app = bot.build_application()
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        # Short long-poll timeout so the client re-opens the connection
+        # regularly, avoiding proxy idle-timeout on the tunnel.
+        timeout=settings.polling_timeout_secs,
+    )
 
 
 if __name__ == "__main__":

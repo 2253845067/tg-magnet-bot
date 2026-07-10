@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
+from functools import wraps
 
 import grpc
 import httpx
@@ -25,6 +28,79 @@ from cili import CiliClient, CiliError
 logger = logging.getLogger(__name__)
 
 
+class _PollingGuard:
+    """Wrap the bot's ``get_updates`` so the process force-exits after the
+    Telegram long-poll connection keeps failing.
+
+    Telegram's ``getUpdates`` is a long-poll: when the request goes through a
+    proxy (Clash, etc.) the tunnel can be dropped by the proxy's idle timeout,
+    or the proxy host can go away overnight. python-telegram-bot retries those
+    network errors forever without exiting, so the process stays "alive" but
+    never receives messages again. Forcing the process to die lets the
+    container manager (e.g. ``restart: unless-stopped``) restart it with a
+    fresh connection.
+
+    ``os._exit`` is used instead of ``sys.exit`` because ``sys.exit`` only
+    raises ``SystemExit``, which the polling retry loop swallows and keeps
+    retrying.
+    """
+
+    def __init__(
+        self,
+        bot,
+        *,
+        max_consecutive_failures: int,
+        staleness_timeout: float,
+        heartbeat_interval: float = 30.0,
+    ) -> None:
+        self._max_failures = max_consecutive_failures
+        self._staleness_timeout = staleness_timeout
+        self._heartbeat_interval = heartbeat_interval
+        self._consecutive_failures = 0
+        self._last_success = time.monotonic()
+        bot.get_updates = self._wrap(bot.get_updates)
+
+    def _wrap(self, orig):
+        @wraps(orig)
+        async def wrapper(*args, **kwargs):
+            try:
+                result = await orig(*args, **kwargs)
+            except BaseException:
+                self._consecutive_failures += 1
+                logger.warning(
+                    "Telegram polling failed (%d/%d consecutive); bot will restart if it persists",
+                    self._consecutive_failures,
+                    self._max_failures,
+                )
+                if self._consecutive_failures >= self._max_failures:
+                    logger.error(
+                        "Too many consecutive polling failures (%d); forcing restart for recovery",
+                        self._consecutive_failures,
+                    )
+                    self._force_exit()
+                raise
+            self._consecutive_failures = 0
+            self._last_success = time.monotonic()
+            return result
+
+        return wrapper
+
+    async def watchdog(self) -> None:
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            if time.monotonic() - self._last_success > self._staleness_timeout:
+                logger.error(
+                    "No successful Telegram polling for %.0fs; forcing restart for recovery",
+                    self._staleness_timeout,
+                )
+                self._force_exit()
+
+    @staticmethod
+    def _force_exit() -> None:
+        logger.error("Forcing process exit for self-healing restart")
+        os._exit(1)
+
+
 class MagnetBot:
     def __init__(
         self,
@@ -41,6 +117,9 @@ class MagnetBot:
             Application.builder()
             .token(self._settings.telegram_bot_token)
             .post_shutdown(self.shutdown)
+            .post_init(self._start_polling_guard)
+            .get_updates_connect_timeout(self._settings.polling_connect_timeout_secs)
+            .get_updates_read_timeout(self._settings.polling_read_timeout_secs)
         )
         if self._settings.telegram_proxy_url:
             builder = builder.proxy(self._settings.telegram_proxy_url)
@@ -55,6 +134,18 @@ class MagnetBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message))
         app.add_error_handler(self.error_handler)
         return app
+
+    async def _start_polling_guard(self, app: Application) -> None:
+        settings = self._settings
+        self._polling_guard = _PollingGuard(
+            app.bot,
+            max_consecutive_failures=settings.polling_max_failures,
+            staleness_timeout=float(settings.polling_staleness_secs),
+            heartbeat_interval=min(
+                30.0, float(settings.polling_staleness_secs) / 2
+            ),
+        )
+        asyncio.create_task(self._polling_guard.watchdog())
 
     async def shutdown(self, _: Application) -> None:
         await self._cili.close()
