@@ -54,6 +54,7 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_user_ids: set[int]
     telegram_proxy_url: str
+    cili_proxy_url: str
     clouddrive_grpc_addr: str
     clouddrive_grpc_tls: bool
     clouddrive_api_token: str
@@ -83,6 +84,10 @@ def load_settings() -> Settings:
         telegram_bot_token=_str("TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_ids("TELEGRAM_ALLOWED_USER_IDS"),
         telegram_proxy_url=_str("TELEGRAM_PROXY_URL"),
+        # cili scrapes overseas sites; by default route it through the same
+        # proxy the bot uses for Telegram so it isn't crawling over a direct
+        # (often blocked / slow) connection. Override with CILI_PROXY_URL.
+        cili_proxy_url=_str("CILI_PROXY_URL", _str("TELEGRAM_PROXY_URL")),
         clouddrive_grpc_addr=_str("CLOUDDRIVE_GRPC_ADDR", "host.docker.internal:19798"),
         clouddrive_grpc_tls=_bool("CLOUDDRIVE_GRPC_TLS"),
         clouddrive_api_token=_str("CLOUDDRIVE_API_TOKEN"),

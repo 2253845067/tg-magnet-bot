@@ -32,6 +32,7 @@ class CiliClient:
         timeout_secs: int = 15,
         max_retries: int = 2,
         retry_backoff_secs: float = 1.0,
+        proxy_url: str | None = None,
     ) -> None:
         if isinstance(base_urls, str):
             base_urls = [base_urls]
@@ -42,10 +43,10 @@ class CiliClient:
         # Last site that successfully answered a search; tried first next time
         # so a flaky-but-working site isn't re-probed from scratch every query.
         self._preferred: str | None = None
-        self._client = httpx.AsyncClient(
-            timeout=timeout_secs,
-            follow_redirects=True,
-            headers={
+        client_kwargs: dict = {
+            "timeout": timeout_secs,
+            "follow_redirects": True,
+            "headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -55,7 +56,10 @@ class CiliClient:
                 "Pragma": "no-cache",
                 "Upgrade-Insecure-Requests": "1",
             },
-        )
+        }
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        self._client = httpx.AsyncClient(**client_kwargs)
 
     async def close(self) -> None:
         await self._client.aclose()

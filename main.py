@@ -22,6 +22,7 @@ def main() -> None:
         settings.http_timeout_secs,
         max_retries=settings.cili_max_retries,
         retry_backoff_secs=settings.cili_retry_backoff_secs,
+        proxy_url=settings.cili_proxy_url,
     )
     clouddrive = CloudDriveClient(
         settings.clouddrive_grpc_addr,
