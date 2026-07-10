@@ -65,7 +65,9 @@ class _PollingGuard:
         async def wrapper(*args, **kwargs):
             try:
                 result = await orig(*args, **kwargs)
-            except BaseException:
+            except asyncio.CancelledError:
+                raise
+            except Exception:
                 self._consecutive_failures += 1
                 logger.warning(
                     "Telegram polling failed (%d/%d consecutive); bot will restart if it persists",
