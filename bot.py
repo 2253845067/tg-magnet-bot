@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import time
-from functools import wraps
 
 import grpc
 import httpx
@@ -15,9 +14,11 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ExtBot,
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from clouddrive_client import CloudDriveClient, CloudDriveError
 from config import Settings
@@ -43,11 +44,12 @@ class _PollingGuard:
     ``os._exit`` is used instead of ``sys.exit`` because ``sys.exit`` only
     raises ``SystemExit``, which the polling retry loop swallows and keeps
     retrying.
+
+    The guard is a callable: ``await guard(original_get_updates, *args, **kwargs)``.
     """
 
     def __init__(
         self,
-        bot,
         *,
         max_consecutive_failures: int,
         staleness_timeout: float,
@@ -58,34 +60,29 @@ class _PollingGuard:
         self._heartbeat_interval = heartbeat_interval
         self._consecutive_failures = 0
         self._last_success = time.monotonic()
-        bot.get_updates = self._wrap(bot.get_updates)
 
-    def _wrap(self, orig):
-        @wraps(orig)
-        async def wrapper(*args, **kwargs):
-            try:
-                result = await orig(*args, **kwargs)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self._consecutive_failures += 1
-                logger.warning(
-                    "Telegram polling failed (%d/%d consecutive); bot will restart if it persists",
+    async def __call__(self, original, *args, **kwargs):
+        try:
+            result = await original(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._consecutive_failures += 1
+            logger.warning(
+                "Telegram polling failed (%d/%d consecutive); bot will restart if it persists",
+                self._consecutive_failures,
+                self._max_failures,
+            )
+            if self._consecutive_failures >= self._max_failures:
+                logger.error(
+                    "Too many consecutive polling failures (%d); forcing restart for recovery",
                     self._consecutive_failures,
-                    self._max_failures,
                 )
-                if self._consecutive_failures >= self._max_failures:
-                    logger.error(
-                        "Too many consecutive polling failures (%d); forcing restart for recovery",
-                        self._consecutive_failures,
-                    )
-                    self._force_exit()
-                raise
-            self._consecutive_failures = 0
-            self._last_success = time.monotonic()
-            return result
-
-        return wrapper
+                self._force_exit()
+            raise
+        self._consecutive_failures = 0
+        self._last_success = time.monotonic()
+        return result
 
     async def watchdog(self) -> None:
         while True:
@@ -103,6 +100,22 @@ class _PollingGuard:
         os._exit(1)
 
 
+class _GuardedExtBot(ExtBot):
+    """``ExtBot`` whose ``get_updates`` is wrapped by a ``_PollingGuard``.
+
+    Subclassing is required because ``ExtBot`` is a ``TelegramObject`` and
+    forbids assigning to its methods at runtime (``bot.get_updates = ...``
+    raises ``AttributeError``). The guard is attached in ``post_init``.
+    """
+
+    _polling_guard: "_PollingGuard | None" = None
+
+    async def get_updates(self, *args, **kwargs):
+        if self._polling_guard is None:
+            return await super().get_updates(*args, **kwargs)
+        return await self._polling_guard(super().get_updates, *args, **kwargs)
+
+
 class MagnetBot:
     def __init__(
         self,
@@ -115,17 +128,13 @@ class MagnetBot:
         self._clouddrive = clouddrive
 
     def build_application(self) -> Application:
+        bot = self._build_guarded_bot()
         builder = (
             Application.builder()
-            .token(self._settings.telegram_bot_token)
+            .bot(bot)
             .post_shutdown(self.shutdown)
             .post_init(self._start_polling_guard)
-            .get_updates_connect_timeout(self._settings.polling_connect_timeout_secs)
-            .get_updates_read_timeout(self._settings.polling_read_timeout_secs)
         )
-        if self._settings.telegram_proxy_url:
-            builder = builder.proxy(self._settings.telegram_proxy_url)
-            builder = builder.get_updates_proxy(self._settings.telegram_proxy_url)
 
         app = builder.build()
         app.add_handler(CommandHandler("start", self.start))
@@ -137,17 +146,33 @@ class MagnetBot:
         app.add_error_handler(self.error_handler)
         return app
 
+    def _build_guarded_bot(self) -> "_GuardedExtBot":
+        settings = self._settings
+        proxy = settings.telegram_proxy_url
+        get_updates_request = HTTPXRequest(
+            connect_timeout=settings.polling_connect_timeout_secs,
+            read_timeout=settings.polling_read_timeout_secs,
+            proxy_url=proxy or None,
+        )
+        request = HTTPXRequest(proxy_url=proxy or None)
+        return _GuardedExtBot(
+            token=settings.telegram_bot_token,
+            request=request,
+            get_updates_request=get_updates_request,
+        )
+
     async def _start_polling_guard(self, app: Application) -> None:
         settings = self._settings
-        self._polling_guard = _PollingGuard(
-            app.bot,
+        guard = _PollingGuard(
             max_consecutive_failures=settings.polling_max_failures,
             staleness_timeout=float(settings.polling_staleness_secs),
             heartbeat_interval=min(
                 30.0, float(settings.polling_staleness_secs) / 2
             ),
         )
-        asyncio.create_task(self._polling_guard.watchdog())
+        app.bot._polling_guard = guard
+        self._polling_guard = guard
+        asyncio.create_task(guard.watchdog())
 
     async def shutdown(self, _: Application) -> None:
         await self._cili.close()
