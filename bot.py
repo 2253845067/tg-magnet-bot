@@ -155,7 +155,6 @@ class MagnetBot:
 
         app = builder.build()
         app.add_handler(CommandHandler("start", self.start))
-        app.add_handler(CommandHandler("help", self.help))
         app.add_handler(CommandHandler("status", self.status))
         app.add_handler(CommandHandler("search", self.search_command))
         app.add_handler(CallbackQueryHandler(self.download_callback, pattern=r"^(dl:\d+|cancel)$"))
@@ -189,7 +188,6 @@ class MagnetBot:
             BotCommand("start", "开始使用 / 查看帮助"),
             BotCommand("search", "搜索磁力资源"),
             BotCommand("status", "检查 CloudDrive2 连接状态"),
-            BotCommand("help", "查看帮助"),
         ])
         # 让输入框旁的菜单按钮直接打开命令列表（默认即是，这里显式设定更稳妥）。
         await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
@@ -208,9 +206,6 @@ class MagnetBot:
             "发关键词给我，我会搜索磁力站；也可以直接发送 magnet 链接提交离线下载。\n"
             "命令：/search 关键词，/status 检查 CloudDrive2。"
         )
-
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.start(update, context)
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
