@@ -15,6 +15,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -33,6 +34,35 @@ from cili import CiliClient, CiliError
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _tg_retry(func, *args, attempts: int = 3, base_delay: float = 1.0, **kwargs):
+    """Retry an outbound Telegram API call on transient network errors.
+
+    Proxy blips (Clash TLS handshake failures) surface as ``NetworkError`` /
+    ``TimedOut``. Without a retry a single hiccup while editing a message would
+    leave the user staring at "正在搜索" forever, because the exception just
+    bubbles up to the global error handler. A couple of retries with short
+    exponential backoff ride over a momentary proxy blip.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            return await func(*args, **kwargs)
+        except RetryAfter as exc:
+            last_exc = exc
+            await asyncio.sleep(exc.retry_after + 1)
+        except (NetworkError, TimedOut) as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            logger.warning(
+                "Telegram call %s failed (attempt %d/%d): %s",
+                getattr(func, "__name__", func), attempt + 1, attempts, exc,
+            )
+            await asyncio.sleep(base_delay * (2 ** attempt))
+    assert last_exc is not None
+    raise last_exc
 
 
 class _PollingGuard:
@@ -259,7 +289,7 @@ class MagnetBot:
             searches = context.user_data.get("searches")
             if searches:
                 searches.pop((message.chat_id, message.message_id), None)
-            await message.edit_text("已取消。")
+            await _tg_retry(message.edit_text, "已取消。")
             return
 
         try:
@@ -277,7 +307,7 @@ class MagnetBot:
         searches.pop((message.chat_id, message.message_id), None)
 
         result = results[index]
-        status = await message.edit_text(f"正在获取磁力链接：{result.title}")
+        status = await _tg_retry(message.edit_text, f"正在获取磁力链接：{result.title}")
         try:
             detail = await self._cili.detail(result.detail_url)
             await asyncio.to_thread(
@@ -285,10 +315,10 @@ class MagnetBot:
                 detail.magnet,
                 self._settings.clouddrive_dest_folder,
             )
-            await status.edit_text(_submitted_message(), parse_mode=ParseMode.HTML)
+            await _tg_retry(status.edit_text, _submitted_message(), parse_mode=ParseMode.HTML)
         except (httpx.HTTPError, CiliError, CloudDriveError, grpc.RpcError) as exc:
             logger.exception("download submission failed")
-            await status.edit_text(f"提交失败：{_format_user_error(exc)}")
+            await _tg_retry(status.edit_text, f"提交失败：{_format_user_error(exc)}")
 
     async def _search_and_reply(
         self,
@@ -297,44 +327,45 @@ class MagnetBot:
         query: str,
     ) -> None:
         message = update.effective_message
-        notice = await message.reply_text(f"正在搜索：{query}")
+        notice = await _tg_retry(message.reply_text, f"正在搜索：{query}")
         try:
             results = await self._cili.search(query, self._settings.max_search_results)
         except (httpx.HTTPError, CiliError) as exc:
             logger.exception("cili search failed")
-            await notice.edit_text(f"搜索失败：{_format_user_error(exc)}")
+            await _tg_retry(notice.edit_text, f"搜索失败：{_format_user_error(exc)}")
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected search failure")
-            await notice.edit_text(f"搜索失败：程序内部错误：{exc}")
+            await _tg_retry(notice.edit_text, f"搜索失败：程序内部错误：{exc}")
             return
 
         if not results:
-            await notice.edit_text("没有找到结果。")
+            await _tg_retry(notice.edit_text, "没有找到结果。")
             return
 
         searches = context.user_data.setdefault("searches", {})
         searches[(notice.chat_id, notice.message_id)] = results
         if len(searches) > 30:
             searches.pop(next(iter(searches)))
-        await notice.edit_text(
+        await _tg_retry(
+            notice.edit_text,
             _format_results(query, results),
             reply_markup=_result_keyboard(results),
             disable_web_page_preview=True,
         )
 
     async def _submit_magnet(self, update: Update, magnet: str, *, title: str) -> None:
-        notice = await update.effective_message.reply_text("正在提交到 CloudDrive2...")
+        notice = await _tg_retry(update.effective_message.reply_text, "正在提交到 CloudDrive2...")
         try:
             await asyncio.to_thread(
                 self._clouddrive.add_offline_file,
                 magnet,
                 self._settings.clouddrive_dest_folder,
             )
-            await notice.edit_text(_submitted_message(), parse_mode=ParseMode.HTML)
+            await _tg_retry(notice.edit_text, _submitted_message(), parse_mode=ParseMode.HTML)
         except (CloudDriveError, grpc.RpcError) as exc:
             logger.exception("manual magnet submission failed")
-            await notice.edit_text(f"提交失败：{_format_user_error(exc)}")
+            await _tg_retry(notice.edit_text, f"提交失败：{_format_user_error(exc)}")
 
     async def _allowed(self, update: Update) -> bool:
         allowed_ids = self._settings.telegram_allowed_user_ids
